@@ -1,96 +1,316 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
+import plotly.express as px
+import plotly.graph_objects as go
 
-st.set_page_config(page_title="섬유 스펙트럼 분석", layout="wide")
-st.title("섬유의 화학적 스펙트럼은 섬유의 종류를 구분할 수 있는가?")
-st.caption("ATR-FTIR 섬유 스펙트럼 데이터 탐색 및 전처리 결과 확인")
+from sklearn.decomposition import PCA
 
 # -----------------------------
-# 1. 데이터 불러오기
+# 1. 페이지 설정
 # -----------------------------
-st.sidebar.header("데이터 업로드")
-feature_file = st.sidebar.file_uploader(
-    "스펙트럼 데이터 CSV", type=["csv"]
-)
-metadata_file = st.sidebar.file_uploader(
-    "선택: 06_metadata.csv (염색 여부 비교용)", type=["csv"]
+st.set_page_config(
+    page_title="섬유 스펙트럼 분석",
+    page_icon="🔬",
+    layout="wide"
 )
 
-DEFAULT_FILE = "05_feature_matrix_preprocessed_als_snv_sgd2.csv"
+st.title("🔬 스펙트럼으로 섬유 종류를 구별할 수 있는가?")
+st.markdown("""
+**분광학 데이터 기반 섬유 종류 비교 및 시각화**
+
+섬유별 스펙트럼의 차이를 분석하고,
+PCA를 통해 종류별 분포와 군집 형성 여부를 확인합니다.
+""")
+
+st.divider()
+
+# -----------------------------
+# 2. 데이터 불러오기
+# -----------------------------
+DATA_URL = (
+    "https://raw.githubusercontent.com/"
+    "dg2025113-source/forensic-science/"
+    "refs/heads/main/"
+    "05_feature_matrix_preprocessed_als_snv_sgd2.csv"
+)
 
 @st.cache_data
-def load_csv(file, default_path=None, encoding="utf-8"):
-    if file is not None:
-        return pd.read_csv(file, encoding=encoding)
-    if default_path:
-        try:
-            return pd.read_csv(default_path, encoding="utf-8")
-        except FileNotFoundError:
-            return None
-    return None
+def load_data(source):
+    return pd.read_csv(source)
 
-df = load_csv(feature_file, DEFAULT_FILE)
+uploaded_file = st.sidebar.file_uploader(
+    "CSV 파일 업로드",
+    type=["csv"]
+)
 
-if df is None:
-    st.warning(
-        "스펙트럼 CSV를 업로드하거나 이 파이썬 파일과 같은 폴더에 "
-        f"'{DEFAULT_FILE}' 파일을 넣어 주세요."
+try:
+    if uploaded_file is not None:
+        df = load_data(uploaded_file)
+    else:
+        df = load_data(DATA_URL)
+
+    st.sidebar.success("데이터 불러오기 완료")
+
+except Exception as e:
+    st.error(f"데이터를 불러오지 못했습니다: {e}")
+    st.stop()
+
+# -----------------------------
+# 3. 데이터 전처리
+# -----------------------------
+metadata_cols = [
+    "Spectrum_ID", "Sample_ID",
+    "Replica", "Origin", "Type", "Subtype"
+]
+
+spectrum_cols = [
+    col for col in df.columns
+    if col not in metadata_cols
+    and pd.to_numeric(pd.Series([col]), errors="coerce").notna().all()
+]
+
+# 파수 숫자 변환
+wavenumbers = np.array(
+    [float(col) for col in spectrum_cols]
+)
+
+# 파수 기준으로 정렬
+sorted_indices = np.argsort(wavenumbers)[::-1]
+
+spectrum_cols = [
+    spectrum_cols[i] for i in sorted_indices
+]
+
+wavenumbers = wavenumbers[sorted_indices]
+
+X = df[spectrum_cols].apply(
+    pd.to_numeric, errors="coerce"
+).fillna(0)
+
+# -----------------------------
+# 4. 데이터 기본 정보
+# -----------------------------
+st.subheader("📊 데이터 기본 정보")
+
+col1, col2, col3, col4 = st.columns(4)
+
+col1.metric("전체 스펙트럼", f"{len(df)}개")
+col2.metric("분광 변수", f"{len(spectrum_cols):,}개")
+col3.metric("섬유 종류", f"{df['Type'].nunique()}종")
+col4.metric("고유 시료", f"{df['Sample_ID'].nunique()}개")
+
+with st.expander("데이터 미리보기"):
+    st.dataframe(df.iloc[:, :12], use_container_width=True)
+
+st.divider()
+
+# -----------------------------
+# 5. 섬유별 데이터 개수
+# -----------------------------
+st.subheader("① 섬유 종류별 데이터 분포")
+
+type_counts = (
+    df["Type"]
+    .value_counts()
+    .rename_axis("섬유 종류")
+    .reset_index(name="측정 개수")
+)
+
+fig_count = px.bar(
+    type_counts,
+    x="섬유 종류",
+    y="측정 개수",
+    color="섬유 종류",
+    text="측정 개수",
+    title="섬유 종류별 스펙트럼 측정 개수"
+)
+
+fig_count.update_layout(
+    showlegend=False,
+    xaxis_title="섬유 종류",
+    yaxis_title="데이터 개수"
+)
+
+st.plotly_chart(fig_count, use_container_width=True)
+
+st.divider()
+
+# -----------------------------
+# 6. 섬유별 평균 스펙트럼
+# -----------------------------
+st.subheader("② 섬유 종류별 평균 스펙트럼 비교")
+
+st.markdown("""
+각 섬유 종류에 속하는 스펙트럼의 평균을 계산합니다.
+곡선의 형태와 파수별 측정값 차이를 비교해 보세요.
+""")
+
+all_types = sorted(df["Type"].dropna().unique())
+
+selected_types = st.multiselect(
+    "비교할 섬유 종류 선택",
+    options=all_types,
+    default=all_types
+)
+
+if selected_types:
+
+    fig_mean = go.Figure()
+
+    for fiber_type in selected_types:
+
+        indices = df.index[df["Type"] == fiber_type]
+
+        mean_values = X.loc[indices].mean(axis=0)
+
+        fig_mean.add_trace(
+            go.Scatter(
+                x=wavenumbers,
+                y=mean_values.values,
+                mode="lines",
+                name=fiber_type
+            )
+        )
+
+    fig_mean.update_layout(
+        title="섬유 종류별 평균 분광 스펙트럼",
+        xaxis_title="파수 (cm⁻¹)",
+        yaxis_title="전처리된 분광 측정값",
+        hovermode="x unified",
+        legend_title="섬유 종류"
     )
-    st.stop()
 
-# 메타데이터는 파일에 따라 인코딩이 다를 수 있음
-meta = None
-if metadata_file is not None:
-    try:
-        meta = pd.read_csv(metadata_file, encoding="utf-8")
-    except UnicodeDecodeError:
-        meta = pd.read_csv(metadata_file, encoding="cp1252")
+    # 일반적인 IR 스펙트럼처럼 파수 감소 방향으로 표시
+    fig_mean.update_xaxes(autorange="reversed")
 
-required = ["Sample_ID", "Type", "Subtype"]
-missing_required = [c for c in required if c not in df.columns]
-if missing_required:
-    st.error(f"필수 열이 없습니다: {missing_required}")
-    st.stop()
+    st.plotly_chart(fig_mean, use_container_width=True)
+
+else:
+    st.info("비교할 섬유 종류를 선택하세요.")
+
+st.divider()
 
 # -----------------------------
-# 2. 전처리
+# 7. 개별 스펙트럼 비교
 # -----------------------------
-original_rows = len(df)
-data = df.copy()
+st.subheader("③ 개별 섬유 스펙트럼 확인")
 
-# Type의 대소문자 차이 통일
-data["Type"] = data["Type"].astype("string").str.strip().str.lower()
-data["Type"] = data["Type"].str.capitalize()
+fiber_type = st.selectbox(
+    "섬유 종류 선택",
+    all_types,
+    key="individual_type"
+)
 
-# 문자열 앞뒤 공백 제거
-for col in ["Sample_ID", "Subtype", "Origin"]:
-    if col in data.columns:
-        data[col] = data[col].astype("string").str.strip()
+filtered_df = df[df["Type"] == fiber_type]
 
-# 숫자형 스펙트럼 열 확인
-info_cols = [
-    "Spectrum_ID", "Sample_ID", "Replica", "Origin", "Type", "Subtype"
-]
-spectral_cols = [
-    c for c in data.columns
-    if c not in info_cols and pd.to_numeric(pd.Index([c]), errors="coerce").notna()[0]
-]
-spectral_cols = sorted(spectral_cols, key=lambda x: float(x), reverse=True)
+sample_options = filtered_df["Spectrum_ID"].tolist()
 
-for col in spectral_cols:
-    data[col] = pd.to_numeric(data[col], errors="coerce")
+selected_sample = st.selectbox(
+    "스펙트럼 선택",
+    sample_options
+)
 
-# 결측치: 결측 셀과 결측 행 확인
-missing_cells_before = int(data.isna().sum().sum())
-rows_with_missing_before = int(data.isna().any(axis=1).sum())
+sample_idx = df.index[
+    df["Spectrum_ID"] == selected_sample
+][0]
 
-# 스펙트럼 값은 임의로 채우지 않고, 결측이 있는 행을 제외하는 방식 적용
-# 현재 제공된 파일은 결측치가 없어 제외되는 행이 없음
-if rows_with_missing_before > 0:
-    data = data.dropna(subset=spectral_cols + ["Type", "Subtype", "Sample_ID"])
+fig_single = go.Figure()
 
-# 완전히 같은 행만 중복으로 판단
-duplicate_rows = int(data.duplicated().sum())
-if duplicate_rows > 0:
+fig_single.add_trace(
+    go.Scatter(
+        x=wavenumbers,
+        y=X.loc[sample_idx].values,
+        mode="lines",
+        name=f"Sample {selected_sample}"
+    )
+)
+
+fig_single.update_layout(
+    title=f"{fiber_type} 개별 스펙트럼",
+    xaxis_title="파수 (cm⁻¹)",
+    yaxis_title="전처리된 분광 측정값"
+)
+
+fig_single.update_xaxes(autorange="reversed")
+
+st.plotly_chart(fig_single, use_container_width=True)
+
+st.divider()
+
+# -----------------------------
+# 8. PCA 차원 축소
+# -----------------------------
+st.subheader("④ PCA를 이용한 섬유 종류별 군집 분석")
+
+st.markdown("""
+3,451개의 분광 변수를 주성분 분석(PCA)을 통해
+2개의 주성분으로 축소합니다.
+
+가까이 위치한 점들은 분광학적 특성이 상대적으로 비슷한
+스펙트럼일 가능성이 있습니다.
+""")
+
+pca = PCA(n_components=2)
+
+pca_result = pca.fit_transform(X)
+
+pca_df = pd.DataFrame({
+    "PC1": pca_result[:, 0],
+    "PC2": pca_result[:, 1],
+    "Type": df["Type"].values,
+    "Sample_ID": df["Sample_ID"].values,
+    "Spectrum_ID": df["Spectrum_ID"].values
+})
+
+explained = pca.explained_variance_ratio_ * 100
+
+fig_pca = px.scatter(
+    pca_df,
+    x="PC1",
+    y="PC2",
+    color="Type",
+    hover_data=["Sample_ID", "Spectrum_ID"],
+    title="PCA 기반 섬유 종류별 분포",
+    labels={
+        "PC1": f"주성분 1 ({explained[0]:.2f}%)",
+        "PC2": f"주성분 2 ({explained[1]:.2f}%)"
+    }
+)
+
+fig_pca.update_traces(
+    marker=dict(size=9, opacity=0.75)
+)
+
+st.plotly_chart(fig_pca, use_container_width=True)
+
+st.info(
+    f"PC1 설명 분산 비율: {explained[0]:.2f}% | "
+    f"PC2 설명 분산 비율: {explained[1]:.2f}% | "
+    f"누적 설명 분산 비율: {sum(explained):.2f}%"
+)
+
+# -----------------------------
+# 9. 분석 결과 해석 안내
+# -----------------------------
+st.divider()
+
+st.subheader("🔍 탐구 결과 해석")
+
+st.markdown("""
+**그래프를 해석할 때 다음 사항을 확인하세요.**
+
+1. 평균 스펙트럼에서 섬유 종류별 곡선의 형태가 다른가?
+2. 특정 파수 영역에서 섬유 종류별 측정값 차이가 뚜렷한가?
+3. PCA 그래프에서 같은 종류의 섬유들이 가까이 모이는가?
+4. 서로 다른 종류의 섬유들이 명확하게 분리되는가?
+
+**주의:** PCA 그래프에서 점들이 겹친다고 해서 섬유를 구별할 수 없다는 뜻은 아닙니다.
+두 개의 주성분만으로는 전체 분광 정보가 충분히 표현되지 않을 수 있습니다.
+""")
+
+st.caption(
+    "데이터 출처: GitHub - forensic-science | "
+    "전처리 데이터: ALS + SNV + SGD2"
+)
