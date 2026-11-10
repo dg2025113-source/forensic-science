@@ -6,6 +6,17 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 from sklearn.decomposition import PCA
+from sklearn.model_selection import train_test_split, StratifiedGroupKFold
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.dummy import DummyClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    accuracy_score, balanced_accuracy_score, precision_score,
+    recall_score, f1_score, classification_report, confusion_matrix
+)
 
 # ==================================================
 # 1. 페이지 설정
@@ -774,8 +785,289 @@ if len(df_clean) > 0:
         use_container_width=True
     )
 
+
 # ==================================================
-# 13. 최종 탐구 결과 해석
+# 13. 머신러닝 분류 모델 학습 및 비교
+# ==================================================
+
+st.divider()
+st.header("⑧ 머신러닝을 이용한 섬유 종류 분류")
+st.markdown("""
+PCA는 고차원 분광 데이터를 2차원으로 요약해 분포를 살펴보는 방법입니다.
+이번 단계에서는 원래의 분광 변수 전체를 이용해 섬유 종류(Type)를 예측하는
+분류 모델을 학습하고, 학습에 사용하지 않은 시험 데이터로 성능을 비교합니다.
+""")
+
+# 사용자가 이상치 후보 중 제외하기로 선택한 데이터만 제외한 자료 사용
+model_df = df_clean.dropna(subset=["Type", "Sample_ID"]).copy()
+model_features = model_df[spectrum_cols].replace([np.inf, -np.inf], np.nan)
+
+# 모델 학습을 위해 남아 있는 비정상 값이 있으면 해당 열의 중앙값으로 보완
+for col in spectrum_cols:
+    if model_features[col].isna().any():
+        med = model_features[col].median()
+        if pd.isna(med):
+            st.error(f"모델 학습에 사용할 수 없는 분광 변수입니다: {col}")
+            st.stop()
+        model_features[col] = model_features[col].fillna(med)
+
+X_model = model_features.to_numpy(dtype=float)
+y_model = model_df["Type"].astype(str).to_numpy()
+groups_model = model_df["Sample_ID"].astype(str).to_numpy()
+class_names = sorted(np.unique(y_model))
+
+st.write(
+    f"모델 입력: 분광 변수 {X_model.shape[1]:,}개 | "
+    f"분류 대상: {len(class_names)}종 | 사용 데이터: {len(model_df)}개"
+)
+
+if len(class_names) < 2:
+    st.error("분류 모델을 학습하려면 섬유 종류가 2종 이상 필요합니다.")
+    st.stop()
+
+# 같은 Sample_ID의 반복 측정값이 학습/시험 양쪽에 들어가는 데이터 누출을 줄이기 위해
+# 가능한 경우 Sample_ID 단위로 그룹 분할한다.
+class_group_counts = (
+    model_df.groupby("Type")["Sample_ID"].nunique()
+)
+min_groups_per_class = int(class_group_counts.min())
+used_group_split = False
+split_note = ""
+
+try:
+    if min_groups_per_class >= 2:
+        n_splits = min(5, min_groups_per_class)
+        splitter = StratifiedGroupKFold(
+            n_splits=n_splits, shuffle=True, random_state=42
+        )
+        train_idx, test_idx = next(
+            splitter.split(X_model, y_model, groups_model)
+        )
+        used_group_split = True
+        split_note = (
+            "같은 Sample_ID가 학습 데이터와 시험 데이터에 동시에 들어가지 않도록 "
+            "시료 단위로 분리했습니다."
+        )
+    else:
+        raise ValueError("일부 섬유 종류의 독립 Sample_ID가 2개 미만입니다.")
+except Exception:
+    # 그룹 분할이 불가능한 경우 층화 분할을 사용하되, 반복 측정값이 섞일 가능성을 알린다.
+    try:
+        train_idx, test_idx = train_test_split(
+            np.arange(len(y_model)),
+            test_size=0.2,
+            random_state=42,
+            stratify=y_model
+        )
+        split_note = (
+            "일부 섬유 종류의 독립 Sample_ID 수가 부족해 스펙트럼 행 단위로 "
+            "층화 분할했습니다. 같은 시료의 반복 측정값이 양쪽에 포함될 가능성이 있어 "
+            "성능이 실제보다 높게 평가될 수 있습니다."
+        )
+    except ValueError as e:
+        st.error(
+            "데이터 수가 적어 학습/시험 데이터를 안정적으로 나눌 수 없습니다. "
+            f"섬유 종류별 데이터 수를 확인하세요. 상세 내용: {e}"
+        )
+        st.stop()
+
+X_train, X_test = X_model[train_idx], X_model[test_idx]
+y_train, y_test = y_model[train_idx], y_model[test_idx]
+
+st.info(split_note)
+
+if len(np.unique(y_train)) < 2:
+    st.error("학습 데이터에 섬유 종류가 2종 이상 포함되어야 합니다.")
+    st.stop()
+
+st.write(
+    f"학습 데이터: {len(train_idx)}개 | 시험 데이터: {len(test_idx)}개 | "
+    f"시험 데이터의 실제 섬유 종류: {len(np.unique(y_test))}종"
+)
+
+with st.expander("학습 데이터와 시험 데이터의 섬유별 개수"):
+    split_counts = pd.DataFrame({
+        "학습 데이터": pd.Series(y_train).value_counts(),
+        "시험 데이터": pd.Series(y_test).value_counts()
+    }).fillna(0).astype(int)
+    split_counts.index.name = "섬유 종류"
+    st.dataframe(split_counts, use_container_width=True)
+
+st.markdown("#### 비교할 모델")
+st.write(
+    "베이스라인은 가장 많이 등장하는 섬유 종류만 예측하는 기준 모델입니다. "
+    "후보 모델은 로지스틱 회귀, 서포트 벡터 머신(SVM), 랜덤 포레스트입니다."
+)
+
+models = {
+    "베이스라인": DummyClassifier(strategy="most_frequent"),
+    "로지스틱 회귀": Pipeline([
+        ("scaler", StandardScaler()),
+        ("model", LogisticRegression(
+            max_iter=5000, class_weight="balanced", random_state=42
+        ))
+    ]),
+    "서포트 벡터 머신(SVM)": Pipeline([
+        ("scaler", StandardScaler()),
+        ("model", SVC(
+            kernel="rbf", C=1.0, gamma="scale", class_weight="balanced"
+        ))
+    ]),
+    "랜덤 포레스트": RandomForestClassifier(
+        n_estimators=300,
+        max_depth=5,
+        min_samples_leaf=2,
+        class_weight="balanced",
+        random_state=42,
+        n_jobs=-1
+    )
+}
+
+if st.button("모델 학습 및 성능 비교", type="primary", key="run_fiber_models"):
+    result_rows = []
+    fitted_models = {}
+    prediction_store = {}
+
+    progress = st.progress(0)
+    status = st.empty()
+    total_models = len(models)
+
+    for i, (model_name, model) in enumerate(models.items(), start=1):
+        status.write(f"{model_name} 학습 중...")
+        model.fit(X_train, y_train)
+        predictions = model.predict(X_test)
+
+        result_rows.append({
+            "모델": model_name,
+            "정확도": accuracy_score(y_test, predictions),
+            "균형 정확도": balanced_accuracy_score(y_test, predictions),
+            "Macro 정밀도": precision_score(
+                y_test, predictions, average="macro", zero_division=0
+            ),
+            "Macro 재현율": recall_score(
+                y_test, predictions, average="macro", zero_division=0
+            ),
+            "Macro F1-score": f1_score(
+                y_test, predictions, average="macro", zero_division=0
+            )
+        })
+        fitted_models[model_name] = model
+        prediction_store[model_name] = predictions
+        progress.progress(i / total_models)
+
+    status.success("모든 모델의 학습과 평가가 완료되었습니다.")
+
+    results_df = pd.DataFrame(result_rows).sort_values(
+        "Macro F1-score", ascending=False
+    ).reset_index(drop=True)
+
+    # Streamlit 재실행 후에도 결과가 유지되도록 세션 상태에 저장
+    st.session_state["fiber_model_results"] = results_df
+    st.session_state["fiber_model_objects"] = fitted_models
+    st.session_state["fiber_model_predictions"] = prediction_store
+    st.session_state["fiber_model_y_test"] = y_test
+    st.session_state["fiber_model_classes"] = class_names
+    st.session_state["fiber_model_test_indices"] = test_idx
+
+if "fiber_model_results" in st.session_state:
+    results_df = st.session_state["fiber_model_results"]
+    prediction_store = st.session_state["fiber_model_predictions"]
+    y_test_saved = st.session_state["fiber_model_y_test"]
+
+    st.markdown("#### 모델 성능 비교 결과")
+    st.dataframe(
+        results_df.style.format({
+            "정확도": "{:.3f}",
+            "균형 정확도": "{:.3f}",
+            "Macro 정밀도": "{:.3f}",
+            "Macro 재현율": "{:.3f}",
+            "Macro F1-score": "{:.3f}"
+        }),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    metric_choice = st.selectbox(
+        "그래프로 비교할 평가 지표",
+        ["정확도", "균형 정확도", "Macro 정밀도", "Macro 재현율", "Macro F1-score"],
+        index=4,
+        key="fiber_metric_choice"
+    )
+    metric_fig = px.bar(
+        results_df,
+        x="모델",
+        y=metric_choice,
+        text=metric_choice,
+        title=f"모델별 {metric_choice} 비교",
+        range_y=[0, 1]
+    )
+    metric_fig.update_traces(texttemplate="%{text:.3f}", textposition="outside")
+    metric_fig.update_layout(yaxis_title=metric_choice, xaxis_title="모델")
+    st.plotly_chart(metric_fig, use_container_width=True)
+
+    best_model_name = results_df.iloc[0]["모델"]
+    best_f1 = results_df.iloc[0]["Macro F1-score"]
+    st.success(
+        f"현재 시험 데이터에서 Macro F1-score가 가장 높은 모델은 "
+        f"{best_model_name}입니다. (Macro F1-score: {best_f1:.3f})"
+    )
+    st.caption(
+        "시험 데이터가 한 번 분리된 소규모 데이터이므로, 가장 높은 점수가 나온 모델이 "
+        "항상 새로운 데이터에서도 가장 우수하다고 단정할 수는 없습니다."
+    )
+
+    selected_model_name = st.selectbox(
+        "자세히 확인할 모델",
+        list(models.keys()),
+        index=list(models.keys()).index(best_model_name),
+        key="fiber_detail_model"
+    )
+    selected_predictions = prediction_store[selected_model_name]
+
+    st.markdown("#### 섬유 종류별 예측 결과")
+    report = classification_report(
+        y_test_saved,
+        selected_predictions,
+        labels=class_names,
+        output_dict=True,
+        zero_division=0
+    )
+    report_df = pd.DataFrame(report).transpose().rename_axis("분류 대상")
+    st.dataframe(
+        report_df.round(3),
+        use_container_width=True
+    )
+
+    cm = confusion_matrix(
+        y_test_saved,
+        selected_predictions,
+        labels=class_names
+    )
+    cm_fig = px.imshow(
+        cm,
+        x=class_names,
+        y=class_names,
+        text_auto=True,
+        aspect="auto",
+        color_continuous_scale="Blues",
+        title=f"{selected_model_name} 혼동 행렬"
+    )
+    cm_fig.update_layout(
+        xaxis_title="모델의 예측 섬유 종류",
+        yaxis_title="실제 섬유 종류"
+    )
+    st.plotly_chart(cm_fig, use_container_width=True)
+    st.caption(
+        "혼동 행렬의 행은 실제 섬유 종류, 열은 모델이 예측한 섬유 종류입니다. "
+        "대각선 숫자가 클수록 해당 종류를 올바르게 분류한 데이터가 많다는 뜻입니다."
+    )
+
+else:
+    st.warning("위의 '모델 학습 및 성능 비교' 버튼을 눌러 결과를 확인하세요.")
+
+
+# ==================================================
+# 14. 최종 탐구 결과 해석
 # ==================================================
 
 st.divider()
@@ -796,7 +1088,7 @@ st.markdown("""
 
 다만 PCA의 2차원 시각화만으로 모든 섬유 종류를 완벽하게 구별할 수 있다고 단정할 수는 없습니다.
 
-실제 식별 가능성을 확인하려면 추가적인 머신러닝 분류 및 검증이 필요합니다.
+실제 식별 가능성은 머신러닝 분류 모델의 시험 데이터 성능과 혼동 행렬을 함께 살펴 판단해야 합니다.
 """)
 
 st.caption(
