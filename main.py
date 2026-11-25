@@ -1095,3 +1095,49 @@ st.caption(
     "데이터 출처: GitHub - forensic-science | "
     "전처리 데이터: ALS + SNV + SG2"
 )
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    f1_score
+)
+import pandas as pd
+
+depths = [2, 5, 10]
+depth_results = []
+
+for depth in depths:
+    model = RandomForestClassifier(
+        n_estimators=300,
+        max_depth=depth,
+        min_samples_leaf=2,
+        class_weight="balanced",
+        random_state=42,
+        n_jobs=-1
+    )
+
+    model.fit(X_train, y_train)
+
+    train_pred = model.predict(X_train)
+    test_pred = model.predict(X_test)
+
+    depth_results.append({
+        "max_depth": depth,
+        "Train Accuracy": accuracy_score(y_train, train_pred),
+        "Test Accuracy": accuracy_score(y_test, test_pred),
+        "Train Macro F1": f1_score(
+            y_train, train_pred,
+            average="macro", zero_division=0
+        ),
+        "Test Macro F1": f1_score(
+            y_test, test_pred,
+            average="macro", zero_division=0
+        ),
+        "Test Balanced Accuracy": balanced_accuracy_score(
+            y_test, test_pred
+        )
+    })
+
+depth_df = pd.DataFrame(depth_results)
+
+print(depth_df.round(3))
