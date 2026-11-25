@@ -1141,4 +1141,4 @@ for depth in depths:
 depth_df = pd.DataFrame(depth_results)
 
 print(depth_df.round(3))
-display(depth_df.round(3))
+st.dataframe(depth_df.round(3), use_container_width=True)
