@@ -1103,7 +1103,7 @@ from sklearn.metrics import (
 )
 import pandas as pd
 
-depths = [2, 5, 10]
+depths = [2, 5, 10, 20]
 depth_results = []
 
 for depth in depths:
